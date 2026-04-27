@@ -517,7 +517,9 @@ google-cloud-iam-credentials-v1      = { default-features = false, path = "src/g
 google-cloud-language-v2             = { default-features = false, path = "src/generated/cloud/language/v2" }
 google-cloud-dns-v1                  = { default-features = false, path = "src/generated/cloud/dns/v1" }
 google-cloud-firestore               = { default-features = false, path = "src/firestore" }
-google-cloud-monitoring-v3           = { default-features = false, path = "src/generated/monitoring/v3" }
+google-cloud-monitoring-dashboard-v1    = { default-features = false, path = "src/generated/monitoring/dashboard/v1" }
+google-cloud-monitoring-metricsscope-v1 = { default-features = false, path = "src/generated/monitoring/metricsscope/v1" }
+google-cloud-monitoring-v3              = { default-features = false, path = "src/generated/monitoring/v3" }
 google-cloud-showcase-v1beta1        = { default-features = false, path = "src/generated/showcase" }
 google-cloud-telcoautomation-v1      = { default-features = false, path = "src/generated/cloud/telcoautomation/v1" }
 google-cloud-trace-v1                = { default-features = false, path = "src/generated/devtools/cloudtrace/v1" }
