@@ -107,6 +107,7 @@ impl<S> PerformUpload<S> {
             );
 
         let builder = self.apply_preconditions(builder);
+        let builder = self.apply_user_project(builder);
         let builder = apply_customer_supplied_encryption_headers(builder, &self.params);
         let builder = builder.body(v1::insert_body(self.resource()).to_string());
         Ok(builder)
@@ -174,6 +175,13 @@ impl<S> PerformUpload<S> {
             builder,
             |b, (k, v)| if v.is_empty() { b } else { b.query(k, v) },
         )
+    }
+
+    fn apply_user_project(&self, builder: HttpRequestBuilder) -> HttpRequestBuilder {
+        self.options
+            .user_project()
+            .into_iter()
+            .fold(builder, |b, v| b.query("userProject", v))
     }
 }
 

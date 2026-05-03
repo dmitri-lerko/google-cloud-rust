@@ -13,8 +13,22 @@
 // limitations under the License.
 
 use super::request_options::RequestOptions;
+use crate::builder::storage::CreateNotification;
+use crate::builder::storage::DeleteNotification;
+use crate::builder::storage::ListNotifications;
 use crate::builder::storage::ReadObject;
+use crate::builder::storage::ServiceAccount;
 use crate::builder::storage::WriteObject;
+use crate::builder::storage::{
+    CreateHmacKey, DeleteHmacKey, GetHmacKey, ListHmacKeys, UpdateHmacKey,
+};
+use crate::builder::storage::{
+    DeleteBucketAcl, DeleteDefaultObjectAcl, DeleteObjectAcl, ListBucketAcls,
+    ListDefaultObjectAcls, ListObjectAcls, UpdateBucketAcl, UpdateDefaultObjectAcl,
+    UpdateObjectAcl,
+};
+use crate::hmac_key::HmacKeyUpdate;
+use crate::notification::Notification;
 use crate::read_resume_policy::ReadResumePolicy;
 use crate::storage::bidi::OpenObject;
 use crate::storage::common_options::CommonOptions;
@@ -24,8 +38,11 @@ use base64::prelude::BASE64_STANDARD;
 use gaxi::http::HttpRequestBuilder;
 use gaxi::options::{ClientConfig, Credentials};
 use google_cloud_auth::credentials::Builder as CredentialsBuilder;
+use google_cloud_auth::credentials::anonymous::Builder as AnonymousCredentialsBuilder;
 use google_cloud_gax::client_builder::{Error as BuilderError, Result as BuilderResult};
 use std::sync::Arc;
+
+const STORAGE_EMULATOR_HOST: &str = "STORAGE_EMULATOR_HOST";
 
 /// Implements a client for the Cloud Storage API.
 ///
@@ -274,6 +291,287 @@ where
         O: Into<String>,
     {
         OpenObject::new(self.stub.clone(), bucket, object, self.options.clone())
+    }
+
+    /// Fetches the email address of the project's Cloud Storage service account.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # async fn sample(client: &Storage) -> anyhow::Result<()> {
+    /// let email = client.service_account("my-project").send().await?;
+    /// println!("service account={email}");
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Parameters
+    /// * `project` - the project ID.
+    pub fn service_account<P>(&self, project: P) -> ServiceAccount<S>
+    where
+        P: Into<String>,
+    {
+        ServiceAccount::new(self.stub.clone(), project, self.options.clone())
+    }
+
+    /// Lists ACL entries on a bucket.
+    pub fn list_bucket_acls<B>(&self, bucket: B) -> ListBucketAcls<S>
+    where
+        B: Into<String>,
+    {
+        ListBucketAcls::new(self.stub.clone(), bucket, self.options.clone())
+    }
+
+    /// Sets the role for an entity in a bucket ACL.
+    pub fn update_bucket_acl<B, E, R>(&self, bucket: B, entity: E, role: R) -> UpdateBucketAcl<S>
+    where
+        B: Into<String>,
+        E: Into<String>,
+        R: Into<String>,
+    {
+        UpdateBucketAcl::new(
+            self.stub.clone(),
+            bucket,
+            entity,
+            role,
+            self.options.clone(),
+        )
+    }
+
+    /// Deletes an entity from a bucket ACL.
+    pub fn delete_bucket_acl<B, E>(&self, bucket: B, entity: E) -> DeleteBucketAcl<S>
+    where
+        B: Into<String>,
+        E: Into<String>,
+    {
+        DeleteBucketAcl::new(self.stub.clone(), bucket, entity, self.options.clone())
+    }
+
+    /// Lists default object ACL entries on a bucket.
+    pub fn list_default_object_acls<B>(&self, bucket: B) -> ListDefaultObjectAcls<S>
+    where
+        B: Into<String>,
+    {
+        ListDefaultObjectAcls::new(self.stub.clone(), bucket, self.options.clone())
+    }
+
+    /// Sets the role for an entity in a bucket's default object ACL.
+    pub fn update_default_object_acl<B, E, R>(
+        &self,
+        bucket: B,
+        entity: E,
+        role: R,
+    ) -> UpdateDefaultObjectAcl<S>
+    where
+        B: Into<String>,
+        E: Into<String>,
+        R: Into<String>,
+    {
+        UpdateDefaultObjectAcl::new(
+            self.stub.clone(),
+            bucket,
+            entity,
+            role,
+            self.options.clone(),
+        )
+    }
+
+    /// Deletes an entity from a bucket's default object ACL.
+    pub fn delete_default_object_acl<B, E>(&self, bucket: B, entity: E) -> DeleteDefaultObjectAcl<S>
+    where
+        B: Into<String>,
+        E: Into<String>,
+    {
+        DeleteDefaultObjectAcl::new(self.stub.clone(), bucket, entity, self.options.clone())
+    }
+
+    /// Lists ACL entries on an object.
+    pub fn list_object_acls<B, O>(&self, bucket: B, object: O) -> ListObjectAcls<S>
+    where
+        B: Into<String>,
+        O: Into<String>,
+    {
+        ListObjectAcls::new(self.stub.clone(), bucket, object, self.options.clone())
+    }
+
+    /// Sets the role for an entity in an object ACL.
+    pub fn update_object_acl<B, O, E, R>(
+        &self,
+        bucket: B,
+        object: O,
+        entity: E,
+        role: R,
+    ) -> UpdateObjectAcl<S>
+    where
+        B: Into<String>,
+        O: Into<String>,
+        E: Into<String>,
+        R: Into<String>,
+    {
+        UpdateObjectAcl::new(
+            self.stub.clone(),
+            bucket,
+            object,
+            entity,
+            role,
+            self.options.clone(),
+        )
+    }
+
+    /// Deletes an entity from an object ACL.
+    pub fn delete_object_acl<B, O, E>(&self, bucket: B, object: O, entity: E) -> DeleteObjectAcl<S>
+    where
+        B: Into<String>,
+        O: Into<String>,
+        E: Into<String>,
+    {
+        DeleteObjectAcl::new(
+            self.stub.clone(),
+            bucket,
+            object,
+            entity,
+            self.options.clone(),
+        )
+    }
+
+    /// Lists Pub/Sub notification configurations on a bucket.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # async fn sample(client: &Storage) -> anyhow::Result<()> {
+    /// let notifications = client
+    ///     .list_notifications("projects/_/buckets/my-bucket")
+    ///     .send()
+    ///     .await?;
+    /// println!("notifications={notifications:?}");
+    /// # Ok(()) }
+    /// ```
+    pub fn list_notifications<B>(&self, bucket: B) -> ListNotifications<S>
+    where
+        B: Into<String>,
+    {
+        ListNotifications::new(self.stub.clone(), bucket, self.options.clone())
+    }
+
+    /// Creates a Pub/Sub notification configuration on a bucket.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # use google_cloud_storage::notification::{JSON_PAYLOAD, Notification};
+    /// # async fn sample(client: &Storage) -> anyhow::Result<()> {
+    /// let notification = Notification {
+    ///     topic_project_id: "my-project".into(),
+    ///     topic_id: "my-topic".into(),
+    ///     payload_format: JSON_PAYLOAD.into(),
+    ///     ..Default::default()
+    /// };
+    /// let created = client
+    ///     .create_notification("projects/_/buckets/my-bucket", notification)
+    ///     .send()
+    ///     .await?;
+    /// println!("created={created:?}");
+    /// # Ok(()) }
+    /// ```
+    pub fn create_notification<B>(
+        &self,
+        bucket: B,
+        notification: Notification,
+    ) -> CreateNotification<S>
+    where
+        B: Into<String>,
+    {
+        CreateNotification::new(
+            self.stub.clone(),
+            bucket,
+            notification,
+            self.options.clone(),
+        )
+    }
+
+    /// Deletes a Pub/Sub notification configuration from a bucket.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # async fn sample(client: &Storage) -> anyhow::Result<()> {
+    /// client
+    ///     .delete_notification("projects/_/buckets/my-bucket", "notification-id")
+    ///     .send()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn delete_notification<B, N>(&self, bucket: B, notification: N) -> DeleteNotification<S>
+    where
+        B: Into<String>,
+        N: Into<String>,
+    {
+        DeleteNotification::new(
+            self.stub.clone(),
+            bucket,
+            notification,
+            self.options.clone(),
+        )
+    }
+
+    /// Creates an HMAC key for a service account.
+    pub fn create_hmac_key<P, E>(&self, project: P, service_account_email: E) -> CreateHmacKey<S>
+    where
+        P: Into<String>,
+        E: Into<String>,
+    {
+        CreateHmacKey::new(
+            self.stub.clone(),
+            project,
+            service_account_email,
+            self.options.clone(),
+        )
+    }
+
+    /// Gets an HMAC key.
+    pub fn get_hmac_key<P, A>(&self, project: P, access_id: A) -> GetHmacKey<S>
+    where
+        P: Into<String>,
+        A: Into<String>,
+    {
+        GetHmacKey::new(self.stub.clone(), project, access_id, self.options.clone())
+    }
+
+    /// Updates an HMAC key.
+    pub fn update_hmac_key<P, A>(
+        &self,
+        project: P,
+        access_id: A,
+        update: HmacKeyUpdate,
+    ) -> UpdateHmacKey<S>
+    where
+        P: Into<String>,
+        A: Into<String>,
+    {
+        UpdateHmacKey::new(
+            self.stub.clone(),
+            project,
+            access_id,
+            update,
+            self.options.clone(),
+        )
+    }
+
+    /// Deletes an HMAC key.
+    pub fn delete_hmac_key<P, A>(&self, project: P, access_id: A) -> DeleteHmacKey<S>
+    where
+        P: Into<String>,
+        A: Into<String>,
+    {
+        DeleteHmacKey::new(self.stub.clone(), project, access_id, self.options.clone())
+    }
+
+    /// Lists HMAC keys in a project.
+    pub fn list_hmac_keys<P>(&self, project: P) -> ListHmacKeys<S>
+    where
+        P: Into<String>,
+    {
+        ListHmacKeys::new(self.stub.clone(), project, self.options.clone())
     }
 }
 
@@ -581,6 +879,27 @@ impl ClientBuilder {
         self
     }
 
+    /// Sets the user project for Requester Pays billing.
+    ///
+    /// Calls with a user project are billed to that project rather than to the
+    /// bucket's owning project. A user project is required for operations on
+    /// Requester Pays buckets.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # async fn sample() -> anyhow::Result<()> {
+    /// let client = Storage::builder()
+    ///     .with_user_project("billing-project")
+    ///     .build()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn with_user_project<V: Into<String>>(mut self, v: V) -> Self {
+        self.common_options.user_project = Some(v.into());
+        self
+    }
+
     /// Configure the resume policy for object reads.
     ///
     /// The Cloud Storage client library can automatically resume a read request
@@ -720,10 +1039,43 @@ impl ClientBuilder {
         Ok(())
     }
 
+    pub(crate) fn apply_emulator_config(&mut self) -> BuilderResult<()> {
+        let Ok(host) = std::env::var(STORAGE_EMULATOR_HOST) else {
+            return Ok(());
+        };
+        if host.is_empty() {
+            return Ok(());
+        }
+
+        if self.config.cred.is_none() {
+            self.config.cred = Some(AnonymousCredentialsBuilder::new().build());
+        }
+        if self.config.endpoint.is_none() {
+            self.config.endpoint = Some(Self::emulator_endpoint(&host)?);
+        }
+        Ok(())
+    }
+
+    fn emulator_endpoint(host: &str) -> BuilderResult<String> {
+        let raw = if host.contains("://") {
+            host.to_string()
+        } else {
+            format!("http://{host}")
+        };
+        let url = url::Url::parse(&raw).map_err(BuilderError::transport)?;
+        if url.host_str().is_none() {
+            return Err(BuilderError::transport(format!(
+                "invalid {STORAGE_EMULATOR_HOST}: missing host"
+            )));
+        }
+        Ok(url.origin().ascii_serialization())
+    }
+
     // Breaks the builder into its parts, with defaults applied.
     pub(crate) fn into_parts(
         mut self,
     ) -> google_cloud_gax::client_builder::Result<(ClientConfig, RequestOptions)> {
+        self.apply_emulator_config()?;
         self.apply_default_credentials()?;
         self.apply_default_endpoint()?;
         let request_options =
@@ -794,6 +1146,8 @@ pub(crate) mod tests {
     use google_cloud_auth::credentials::anonymous::Builder as Anonymous;
     use google_cloud_gax::retry_result::RetryResult;
     use google_cloud_gax::retry_state::RetryState;
+    use scoped_env::ScopedEnv;
+    use serial_test::serial;
     use std::{sync::Arc, time::Duration};
 
     #[test]
@@ -820,6 +1174,78 @@ pub(crate) mod tests {
             config.grpc_subchannel_count.is_some_and(|v| v == 42),
             "{config:?}"
         );
+    }
+
+    #[test]
+    fn emulator_endpoint() -> BuilderResult<()> {
+        let cases = [
+            ("localhost:9000", "http://localhost:9000"),
+            ("http://emu.example.com", "http://emu.example.com"),
+            (
+                "https://emu.example.com:4443",
+                "https://emu.example.com:4443",
+            ),
+            (
+                "https://emu.example.com:4443/storage/v1",
+                "https://emu.example.com:4443",
+            ),
+            ("http://[::1]:9000/storage/v1", "http://[::1]:9000"),
+        ];
+
+        for (input, want) in cases {
+            let got = ClientBuilder::emulator_endpoint(input)?;
+            assert_eq!(got, want, "{input}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn emulator_endpoint_rejects_missing_host() {
+        let err =
+            ClientBuilder::emulator_endpoint("http://").expect_err("missing host should fail");
+        assert!(err.is_transport(), "{err:?}");
+    }
+
+    #[test]
+    #[serial]
+    fn storage_emulator_host_defaults_endpoint_and_credentials() -> BuilderResult<()> {
+        let _e = ScopedEnv::set(STORAGE_EMULATOR_HOST, "localhost:9000");
+
+        let (config, _) = ClientBuilder::new().into_parts()?;
+
+        assert_eq!(config.endpoint.as_deref(), Some("http://localhost:9000"));
+        assert!(config.cred.is_some(), "{config:?}");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn storage_emulator_host_keeps_custom_endpoint() -> BuilderResult<()> {
+        let _e = ScopedEnv::set(STORAGE_EMULATOR_HOST, "localhost:9000");
+
+        let (config, _) = ClientBuilder::new()
+            .with_endpoint("https://private.googleapis.com")
+            .into_parts()?;
+
+        assert_eq!(
+            config.endpoint.as_deref(),
+            Some("https://private.googleapis.com")
+        );
+        assert!(config.cred.is_some(), "{config:?}");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn storage_emulator_host_empty_is_ignored() -> BuilderResult<()> {
+        let _e = ScopedEnv::set(STORAGE_EMULATOR_HOST, "");
+        let mut builder = ClientBuilder::new();
+
+        builder.apply_emulator_config()?;
+
+        assert_eq!(builder.config.endpoint, None);
+        assert!(builder.config.cred.is_none(), "{:?}", builder.config.cred);
+        Ok(())
     }
 
     #[derive(Debug)]

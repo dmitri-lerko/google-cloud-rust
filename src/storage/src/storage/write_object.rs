@@ -824,6 +824,29 @@ where
         self
     }
 
+    /// Sets the user project for Requester Pays billing on this request.
+    ///
+    /// Calls with a user project are billed to that project rather than to the
+    /// bucket's owning project. A user project is required for operations on
+    /// Requester Pays buckets.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # async fn sample(client: &Storage) -> anyhow::Result<()> {
+    /// let mut response = client
+    ///     .write_object("projects/_/buckets/my-bucket", "my-object", "hello world")
+    ///     .with_user_project("billing-project")
+    ///     .send_buffered()
+    ///     .await?;
+    /// println!("response details={response:?}");
+    /// # Ok(()) }
+    /// ```
+    pub fn with_user_project(mut self, user_project: impl Into<String>) -> Self {
+        self.options.set_user_project(user_project);
+        self
+    }
+
     fn mut_resource(&mut self) -> &mut crate::model::Object {
         self.request
             .spec
@@ -1315,15 +1338,19 @@ mod tests {
         assert_eq!(request.options.resumable_upload_threshold(), 123);
         assert_eq!(request.options.resumable_upload_buffer_size(), 234);
         assert_eq!(request.options.user_agent, None);
+        assert_eq!(request.options.user_project(), None);
 
         let user_agent = "quick_foxes_lazy_dogs/1.0.0";
+        let user_project = "billing-project";
         let request = WriteObject::new(stub, "projects/_/buckets/bucket", "object", "", options)
             .with_resumable_upload_threshold(345_usize)
             .with_resumable_upload_buffer_size(456_usize)
-            .with_user_agent(user_agent);
+            .with_user_agent(user_agent)
+            .with_user_project(user_project);
         assert_eq!(request.options.resumable_upload_threshold(), 345);
         assert_eq!(request.options.resumable_upload_buffer_size(), 456);
         assert_eq!(request.options.user_agent.as_deref(), Some(user_agent));
+        assert_eq!(request.options.user_project(), Some(user_project));
     }
 
     const QUICK: &str = "the quick brown fox jumps over the lazy dog";
@@ -1643,6 +1670,70 @@ mod tests {
                 "hello world",
             )
             .with_user_agent(user_agent)
+            .send_unbuffered()
+            .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_object_with_user_project() -> Result {
+        let user_project = "billing-project";
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/upload/storage/v1/b/test-bucket/o"),
+                request::query(url_decoded(contains(("uploadType", "multipart")))),
+                request::query(url_decoded(contains(("userProject", user_project)))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body("{}")),
+        );
+
+        let client = Storage::builder()
+            .with_endpoint(format!("http://{}", server.addr()))
+            .with_credentials(Anonymous::new().build())
+            .build()
+            .await?;
+        let _ = client
+            .write_object(
+                "projects/_/buckets/test-bucket",
+                "test-object",
+                "hello world",
+            )
+            .with_user_project(user_project)
+            .send_unbuffered()
+            .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_object_with_client_user_project() -> Result {
+        let user_project = "client-billing-project";
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/upload/storage/v1/b/test-bucket/o"),
+                request::query(url_decoded(contains(("uploadType", "multipart")))),
+                request::query(url_decoded(contains(("userProject", user_project)))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body("{}")),
+        );
+
+        let client = Storage::builder()
+            .with_endpoint(format!("http://{}", server.addr()))
+            .with_credentials(Anonymous::new().build())
+            .with_user_project(user_project)
+            .build()
+            .await?;
+        let _ = client
+            .write_object(
+                "projects/_/buckets/test-bucket",
+                "test-object",
+                "hello world",
+            )
             .send_unbuffered()
             .await?;
 

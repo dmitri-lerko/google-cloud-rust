@@ -22,6 +22,7 @@ use crate::{
 use gaxi::options::ClientConfig;
 use google_cloud_gax::{
     backoff_policy::BackoffPolicy,
+    options::internal::{RequestHeaders, RequestOptionsExt},
     retry_policy::RetryPolicy,
     retry_throttler::{AdaptiveThrottler, SharedRetryThrottler},
 };
@@ -122,6 +123,19 @@ impl RequestOptions {
         self.user_agent = Some(v.into());
     }
 
+    /// Sets the user project for Requester Pays billing.
+    pub fn set_user_project(&mut self, v: impl Into<String>) {
+        self.common_options.user_project = Some(v.into());
+    }
+
+    /// Returns the user project for Requester Pays billing.
+    pub fn user_project(&self) -> Option<&str> {
+        self.common_options
+            .user_project
+            .as_deref()
+            .filter(|v| !v.is_empty())
+    }
+
     fn new_with_policies(
         retry_policy: Arc<dyn RetryPolicy>,
         backoff_policy: Arc<dyn BackoffPolicy>,
@@ -154,6 +168,12 @@ impl RequestOptions {
         }
         if let Some(s) = &self.user_agent {
             options.set_user_agent(s);
+        }
+        if let Some(user_project) = self.user_project() {
+            options = options.insert_extension(RequestHeaders(vec![(
+                "x-goog-user-project",
+                user_project.to_string(),
+            )]));
         }
         options
     }
@@ -198,5 +218,38 @@ mod tests {
         options.with_user_agent(user_agent);
         let got = options.gax();
         assert_eq!(got.user_agent().as_deref(), Some(user_agent));
+    }
+
+    #[test]
+    fn user_project() {
+        let mut options = RequestOptions::new();
+        assert_eq!(options.user_project(), None);
+
+        options.set_user_project("billing-project");
+        assert_eq!(options.user_project(), Some("billing-project"));
+
+        let got = options.gax();
+        let headers = got
+            .get_extension::<RequestHeaders>()
+            .expect("user project should be routed to gRPC headers");
+        assert_eq!(
+            headers,
+            &RequestHeaders(vec![("x-goog-user-project", "billing-project".to_string())])
+        );
+    }
+
+    #[test]
+    fn user_project_empty_is_ignored() {
+        let mut options = RequestOptions::new();
+        options.set_user_project("");
+        assert_eq!(options.user_project(), None);
+    }
+
+    #[test]
+    fn user_project_clone_is_stable() {
+        let mut options = RequestOptions::new();
+        options.set_user_project("billing-project");
+        let clone = options.clone();
+        assert_eq!(clone.user_project(), Some("billing-project"));
     }
 }

@@ -263,6 +263,9 @@ pub mod internal {
     #[derive(Debug, Clone, Default, PartialEq)]
     pub struct ResourceName(pub String);
 
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct RequestHeaders(pub Vec<(&'static str, String)>);
+
     // Cannot remove this function, as that would break any client libraries
     // that are released and use this function.
     #[deprecated]

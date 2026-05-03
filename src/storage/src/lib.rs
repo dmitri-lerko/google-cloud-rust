@@ -21,6 +21,7 @@
 //! * [Storage][client::Storage]
 //! * [StorageControl][client::StorageControl]
 //! * [SignedUrlBuilder][builder::storage::SignedUrlBuilder]
+//! * [PostPolicyV4Builder][builder::storage::PostPolicyV4Builder]
 //!
 //! **NOTE:** This crate used to contain a different implementation, with a
 //! different surface. [@yoshidan](https://github.com/yoshidan) generously
@@ -56,8 +57,12 @@ pub(crate) use google_cloud_gax::options::RequestOptions;
 pub(crate) use google_cloud_gax::options::internal::RequestBuilder;
 pub(crate) use google_cloud_gax::response::Response;
 
+pub mod acl;
 pub mod backoff_policy;
+pub mod hmac_key;
+pub mod notification;
 pub mod object_descriptor;
+pub mod post_policy_v4;
 pub mod read_object;
 pub mod read_resume_policy;
 pub mod retry_policy;
@@ -94,9 +99,22 @@ pub mod builder {
     //! Request builders.
     pub mod storage {
         //! Request builders for [Storage][crate::client::Storage].
+        pub use crate::storage::acl::{
+            DeleteBucketAcl, DeleteDefaultObjectAcl, DeleteObjectAcl, ListBucketAcls,
+            ListDefaultObjectAcls, ListObjectAcls, UpdateBucketAcl, UpdateDefaultObjectAcl,
+            UpdateObjectAcl,
+        };
         pub use crate::storage::client::ClientBuilder;
+        pub use crate::storage::hmac_key::{
+            CreateHmacKey, DeleteHmacKey, GetHmacKey, ListHmacKeys, UpdateHmacKey,
+        };
+        pub use crate::storage::notification::{
+            CreateNotification, DeleteNotification, ListNotifications,
+        };
         pub use crate::storage::open_object::OpenObject;
+        pub use crate::storage::post_policy_v4::PostPolicyV4Builder;
         pub use crate::storage::read_object::ReadObject;
+        pub use crate::storage::service_account::ServiceAccount;
         pub use crate::storage::signed_url::SignedUrlBuilder;
         pub use crate::storage::write_object::WriteObject;
     }

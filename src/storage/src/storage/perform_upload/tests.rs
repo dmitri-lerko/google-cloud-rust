@@ -82,6 +82,67 @@ async fn start_resumable_upload() -> Result {
 }
 
 #[tokio::test]
+async fn start_resumable_upload_with_user_project() -> Result {
+    let inner = test_inner_client(test_builder()).await;
+    let options = inner.options.clone();
+    let stub = crate::storage::transport::Storage::new_test(inner.clone());
+    let builder = WriteObject::new(
+        stub,
+        "projects/_/buckets/bucket",
+        "object",
+        "hello",
+        options,
+    )
+    .with_user_project("billing-project");
+    let request = perform_upload(inner, builder)
+        .start_resumable_upload_request()
+        .await?
+        .build_for_tests()
+        .await?;
+
+    assert_eq!(request.method(), Method::POST);
+    assert_eq!(
+        request.url().as_str(),
+        "http://private.googleapis.com/upload/storage/v1/b/bucket/o?uploadType=resumable&name=object&userProject=billing-project"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn start_resumable_upload_user_project_is_url_encoded() -> Result {
+    let user_project = "billing project/tenant:alpha";
+    let inner = test_inner_client(test_builder()).await;
+    let options = inner.options.clone();
+    let stub = crate::storage::transport::Storage::new_test(inner.clone());
+    let builder = WriteObject::new(
+        stub,
+        "projects/_/buckets/bucket",
+        "object",
+        "hello",
+        options,
+    )
+    .with_user_project(user_project);
+    let request = perform_upload(inner, builder)
+        .start_resumable_upload_request()
+        .await?
+        .build_for_tests()
+        .await?;
+
+    assert!(
+        request
+            .url()
+            .query_pairs()
+            .any(|(k, v)| k == "userProject" && v == user_project),
+        "{request:?}"
+    );
+    assert!(
+        !request.url().as_str().contains(user_project),
+        "{request:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn start_resumable_upload_headers() -> Result {
     // Make a 32-byte key.
     let (key, key_base64, _, key_sha256_base64) = create_key_helper();

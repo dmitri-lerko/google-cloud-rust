@@ -462,6 +462,29 @@ where
         self
     }
 
+    /// Sets the user project for Requester Pays billing on this request.
+    ///
+    /// Calls with a user project are billed to that project rather than to the
+    /// bucket's owning project. A user project is required for operations on
+    /// Requester Pays buckets.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # async fn sample(client: &Storage) -> anyhow::Result<()> {
+    /// let response = client
+    ///     .read_object("projects/_/buckets/my-bucket", "my-object")
+    ///     .with_user_project("billing-project")
+    ///     .send()
+    ///     .await?;
+    /// println!("response details={response:?}");
+    /// # Ok(()) }
+    /// ```
+    pub fn with_user_project(mut self, user_project: impl Into<String>) -> Self {
+        self.options.set_user_project(user_project);
+        self
+    }
+
     /// Sends the request.
     pub async fn send(self) -> Result<ReadObjectResponse> {
         self.stub.read_object(self.request, self.options).await
@@ -582,6 +605,11 @@ impl Reader {
             .if_metageneration_not_match
             .iter()
             .fold(builder, |b, v| b.query("ifMetagenerationNotMatch", v));
+        let builder = self
+            .options
+            .user_project()
+            .into_iter()
+            .fold(builder, |b, v| b.query("userProject", v));
 
         let builder = apply_customer_supplied_encryption_headers(
             builder,
@@ -1132,6 +1160,112 @@ mod tests {
             got.extend_from_slice(&b);
         }
         assert_eq!(bytes::Bytes::from_owner(got), "hello world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_object_with_user_project() -> Result {
+        let user_project = "billing-project";
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/storage/v1/b/test-bucket/o/test-object"),
+                request::headers(contains(("accept-encoding", "gzip"))),
+                request::query(url_decoded(contains(("alt", "media")))),
+                request::query(url_decoded(contains(("userProject", user_project)))),
+            ])
+            .respond_with(
+                status_code(200)
+                    .body("hello world")
+                    .append_header("x-goog-generation", 123456),
+            ),
+        );
+
+        let client = Storage::builder()
+            .with_endpoint(format!("http://{}", server.addr()))
+            .with_credentials(Anonymous::new().build())
+            .build()
+            .await?;
+        let mut reader = client
+            .read_object("projects/_/buckets/test-bucket", "test-object")
+            .with_user_project(user_project)
+            .send()
+            .await?;
+        let mut got = Vec::new();
+        while let Some(b) = reader.next().await.transpose()? {
+            got.extend_from_slice(&b);
+        }
+        assert_eq!(bytes::Bytes::from_owner(got), "hello world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_object_with_client_user_project() -> Result {
+        let user_project = "client-billing-project";
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/storage/v1/b/test-bucket/o/test-object"),
+                request::headers(contains(("accept-encoding", "gzip"))),
+                request::query(url_decoded(contains(("alt", "media")))),
+                request::query(url_decoded(contains(("userProject", user_project)))),
+            ])
+            .respond_with(
+                status_code(200)
+                    .body("hello world")
+                    .append_header("x-goog-generation", 123456),
+            ),
+        );
+
+        let client = Storage::builder()
+            .with_endpoint(format!("http://{}", server.addr()))
+            .with_credentials(Anonymous::new().build())
+            .with_user_project(user_project)
+            .build()
+            .await?;
+        let mut reader = client
+            .read_object("projects/_/buckets/test-bucket", "test-object")
+            .send()
+            .await?;
+        let mut got = Vec::new();
+        while let Some(b) = reader.next().await.transpose()? {
+            got.extend_from_slice(&b);
+        }
+        assert_eq!(bytes::Bytes::from_owner(got), "hello world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_object_user_project_is_url_encoded() -> Result {
+        let user_project = "billing project/tenant:alpha";
+        let inner = test_inner_client(test_builder()).await;
+        let stub = crate::storage::transport::Storage::new_test(inner.clone());
+        let builder = ReadObject::new(
+            stub,
+            "projects/_/buckets/bucket",
+            "object",
+            RequestOptions::new(),
+        )
+        .with_user_project(user_project);
+        let request = http_request_builder(inner, builder)
+            .await?
+            .build_for_tests()
+            .await?;
+
+        assert!(
+            request
+                .url()
+                .query_pairs()
+                .any(|(k, v)| k == "userProject" && v == user_project),
+            "{request:?}"
+        );
+        assert!(
+            !request.url().as_str().contains(user_project),
+            "{request:?}"
+        );
 
         Ok(())
     }

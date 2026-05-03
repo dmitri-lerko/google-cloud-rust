@@ -34,6 +34,7 @@ use google_cloud_gax::client_builder::Result as ClientBuilderResult;
 use google_cloud_gax::error::Error;
 use google_cloud_gax::exponential_backoff::ExponentialBackoff;
 use google_cloud_gax::options::RequestOptions;
+use google_cloud_gax::options::internal::{RequestHeaders, RequestOptionsExt};
 use google_cloud_gax::polling_backoff_policy::PollingBackoffPolicy;
 use google_cloud_gax::polling_error_policy::{
     Aip194Strict as PollingAip194Strict, PollingErrorPolicy,
@@ -571,6 +572,14 @@ impl Client {
                 http::header::HeaderName::from_static("x-goog-request-params"),
                 http::header::HeaderValue::from_str(request_params).map_err(Error::ser)?,
             );
+        }
+        if let Some(extra) = options.get_extension::<RequestHeaders>() {
+            for (name, value) in &extra.0 {
+                headers.append(
+                    http::header::HeaderName::from_static(name),
+                    http::header::HeaderValue::from_str(value).map_err(Error::ser)?,
+                );
+            }
         }
         Ok(headers)
     }

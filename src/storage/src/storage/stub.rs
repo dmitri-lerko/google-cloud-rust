@@ -13,8 +13,11 @@
 // limitations under the License.
 
 use crate::Result;
+use crate::acl::AclRule;
+use crate::hmac_key::{HmacKey, HmacKeyUpdate, ListHmacKeysResponse};
 use crate::model::{Object, ReadObjectRequest};
 use crate::model_ext::WriteObjectRequest;
+use crate::notification::Notification;
 use crate::read_object::ReadObjectResponse;
 use crate::storage::request_options::RequestOptions;
 use crate::streaming_source::{Seek, StreamingSource};
@@ -80,6 +83,192 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     ) -> impl std::future::Future<Output = Result<(Descriptor, Vec<ReadObjectResponse>)>> + Send
     {
         unimplemented_stub::<(Descriptor, Vec<ReadObjectResponse>)>()
+    }
+
+    /// Implements [crate::client::Storage::service_account].
+    fn service_account(
+        &self,
+        _project: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<String>> + Send {
+        unimplemented_stub::<String>()
+    }
+
+    /// Implements [crate::client::Storage::list_bucket_acls].
+    fn list_bucket_acls(
+        &self,
+        _bucket: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<Vec<AclRule>>> + Send {
+        unimplemented_stub::<Vec<AclRule>>()
+    }
+
+    /// Implements [crate::client::Storage::update_bucket_acl].
+    fn update_bucket_acl(
+        &self,
+        _bucket: String,
+        _entity: String,
+        _role: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::delete_bucket_acl].
+    fn delete_bucket_acl(
+        &self,
+        _bucket: String,
+        _entity: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::list_default_object_acls].
+    fn list_default_object_acls(
+        &self,
+        _bucket: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<Vec<AclRule>>> + Send {
+        unimplemented_stub::<Vec<AclRule>>()
+    }
+
+    /// Implements [crate::client::Storage::update_default_object_acl].
+    fn update_default_object_acl(
+        &self,
+        _bucket: String,
+        _entity: String,
+        _role: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::delete_default_object_acl].
+    fn delete_default_object_acl(
+        &self,
+        _bucket: String,
+        _entity: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::list_object_acls].
+    fn list_object_acls(
+        &self,
+        _bucket: String,
+        _object: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<Vec<AclRule>>> + Send {
+        unimplemented_stub::<Vec<AclRule>>()
+    }
+
+    /// Implements [crate::client::Storage::update_object_acl].
+    fn update_object_acl(
+        &self,
+        _bucket: String,
+        _object: String,
+        _entity: String,
+        _role: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::delete_object_acl].
+    fn delete_object_acl(
+        &self,
+        _bucket: String,
+        _object: String,
+        _entity: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::list_notifications].
+    fn list_notifications(
+        &self,
+        _bucket: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<std::collections::BTreeMap<String, Notification>>> + Send
+    {
+        unimplemented_stub::<std::collections::BTreeMap<String, Notification>>()
+    }
+
+    /// Implements [crate::client::Storage::create_notification].
+    fn create_notification(
+        &self,
+        _bucket: String,
+        _notification: Notification,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<Notification>> + Send {
+        unimplemented_stub::<Notification>()
+    }
+
+    /// Implements [crate::client::Storage::delete_notification].
+    fn delete_notification(
+        &self,
+        _bucket: String,
+        _notification: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::create_hmac_key].
+    fn create_hmac_key(
+        &self,
+        _project: String,
+        _service_account_email: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<HmacKey>> + Send {
+        unimplemented_stub::<HmacKey>()
+    }
+
+    /// Implements [crate::client::Storage::get_hmac_key].
+    fn get_hmac_key(
+        &self,
+        _project: String,
+        _access_id: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<HmacKey>> + Send {
+        unimplemented_stub::<HmacKey>()
+    }
+
+    /// Implements [crate::client::Storage::update_hmac_key].
+    fn update_hmac_key(
+        &self,
+        _project: String,
+        _access_id: String,
+        _update: HmacKeyUpdate,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<HmacKey>> + Send {
+        unimplemented_stub::<HmacKey>()
+    }
+
+    /// Implements [crate::client::Storage::delete_hmac_key].
+    fn delete_hmac_key(
+        &self,
+        _project: String,
+        _access_id: String,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        unimplemented_stub::<()>()
+    }
+
+    /// Implements [crate::client::Storage::list_hmac_keys].
+    fn list_hmac_keys(
+        &self,
+        _project: String,
+        _service_account_email: Option<String>,
+        _show_deleted_keys: bool,
+        _page_size: Option<i64>,
+        _page_token: Option<String>,
+        _options: RequestOptions,
+    ) -> impl std::future::Future<Output = Result<ListHmacKeysResponse>> + Send {
+        unimplemented_stub::<ListHmacKeysResponse>()
     }
 }
 

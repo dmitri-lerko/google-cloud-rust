@@ -13,21 +13,34 @@
 // limitations under the License.
 
 use super::tracing::{TracingObjectDescriptor, TracingResponse};
-use crate::Result;
+use crate::acl::AclRule;
+use crate::hmac_key::{HmacKey, HmacKeyUpdate, ListHmacKeysResponse};
 use crate::model::{Object, ReadObjectRequest};
 use crate::model_ext::WriteObjectRequest;
+use crate::notification::Notification;
 use crate::read_object::ReadObjectResponse;
-use crate::storage::client::StorageInner;
-use crate::storage::info::INSTRUMENTATION;
+use crate::storage::acl::{RawAclList, RawAclRule};
+use crate::storage::client::{StorageInner, enc};
+use crate::storage::hmac_key::{RawHmacKey, RawHmacKeyMetadata, RawListHmacKeysResponse};
+use crate::storage::info::{INSTRUMENTATION, X_GOOG_API_CLIENT_HEADER};
+use crate::storage::notification::{
+    ListNotificationsResponse, RawNotification, notifications_to_map,
+};
 use crate::storage::perform_upload::PerformUpload;
 use crate::storage::read_object::Reader;
 use crate::storage::request_options::RequestOptions;
+use crate::storage::service_account::ServiceAccountResponse;
 use crate::storage::streaming_source::{Seek, StreamingSource};
+use crate::{Error, Result};
 use crate::{
     model_ext::OpenObjectRequest, object_descriptor::ObjectDescriptor,
     storage::bidi::connector::Connector, storage::bidi::transport::ObjectDescriptorTransport,
 };
+use gaxi::attempt_info::AttemptInfo;
+use gaxi::http::reqwest::{HeaderValue, Method};
 use gaxi::observability::{ClientRequestAttributes, DurationMetric, RequestRecorder};
+use google_cloud_gax::options::internal::{PathTemplate, RequestOptionsExt, ResourceName};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// An implementation of [`stub::Storage`][crate::storage::stub::Storage] that
@@ -262,6 +275,1072 @@ impl Storage {
             .collect::<Vec<_>>();
         Ok((descriptor, readers))
     }
+
+    async fn service_account_plain(
+        &self,
+        project: String,
+        options: RequestOptions,
+    ) -> Result<String> {
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::service_account_attempt(inner.clone(), &project, &options, current).await
+        };
+
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            true,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn service_account_attempt(
+        inner: Arc<StorageInner>,
+        project: &str,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<String> {
+        let builder = inner
+            .client
+            .http_builder(
+                Method::GET,
+                &format!("/storage/v1/projects/{}/serviceAccount", enc(project)),
+            )
+            .header(
+                "x-goog-api-client",
+                HeaderValue::from_static(&X_GOOG_API_CLIENT_HEADER),
+            );
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(
+                "/storage/v1/projects/{project}/serviceAccount",
+            ))
+            .insert_extension(ResourceName(format!(
+                "//storage.googleapis.com/projects/{project}"
+            )));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response =
+            serde_json::from_slice::<ServiceAccountResponse>(&body).map_err(Error::deser)?;
+        Ok(response.email_address)
+    }
+
+    #[tracing::instrument(name = "service_account", level = tracing::Level::DEBUG, ret, err(Debug))]
+    async fn service_account_tracing(
+        &self,
+        project: String,
+        options: RequestOptions,
+    ) -> Result<String> {
+        let resource_name = format!("//storage.googleapis.com/projects/{project}");
+        let (_span, pending) = gaxi::client_request_signals!(
+            metric: self.metric.clone(),
+            info: *INSTRUMENTATION,
+            method: "client::Storage::service_account",
+            async {
+                if let Some(recorder) = RequestRecorder::current() {
+                    recorder.on_client_request(
+                        ClientRequestAttributes::default()
+                            .set_url_template("/storage/v1/projects/{project}/serviceAccount")
+                            .set_resource_name(resource_name),
+                    );
+                }
+                self.service_account_plain(project, options).await
+            }
+        );
+        pending.await
+    }
+
+    async fn list_bucket_acls_plain(
+        &self,
+        bucket: String,
+        options: RequestOptions,
+    ) -> Result<Vec<AclRule>> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.list_acls_plain(
+            format!("/storage/v1/b/{}/acl", enc(&bucket_id)),
+            "/storage/v1/b/{bucket}/acl",
+            format!("//storage.googleapis.com/{bucket}"),
+            options,
+        )
+        .await
+    }
+
+    async fn update_bucket_acl_plain(
+        &self,
+        bucket: String,
+        entity: String,
+        role: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.update_acl_plain(
+            format!("/storage/v1/b/{}/acl/{}", enc(&bucket_id), enc(&entity)),
+            "/storage/v1/b/{bucket}/acl/{entity}",
+            format!("//storage.googleapis.com/{bucket}"),
+            entity,
+            role,
+            options,
+        )
+        .await
+    }
+
+    async fn delete_bucket_acl_plain(
+        &self,
+        bucket: String,
+        entity: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.delete_acl_plain(
+            format!("/storage/v1/b/{}/acl/{}", enc(&bucket_id), enc(&entity)),
+            "/storage/v1/b/{bucket}/acl/{entity}",
+            format!("//storage.googleapis.com/{bucket}"),
+            options,
+        )
+        .await
+    }
+
+    async fn list_default_object_acls_plain(
+        &self,
+        bucket: String,
+        options: RequestOptions,
+    ) -> Result<Vec<AclRule>> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.list_acls_plain(
+            format!("/storage/v1/b/{}/defaultObjectAcl", enc(&bucket_id)),
+            "/storage/v1/b/{bucket}/defaultObjectAcl",
+            format!("//storage.googleapis.com/{bucket}"),
+            options,
+        )
+        .await
+    }
+
+    async fn update_default_object_acl_plain(
+        &self,
+        bucket: String,
+        entity: String,
+        role: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.update_acl_plain(
+            format!(
+                "/storage/v1/b/{}/defaultObjectAcl/{}",
+                enc(&bucket_id),
+                enc(&entity)
+            ),
+            "/storage/v1/b/{bucket}/defaultObjectAcl/{entity}",
+            format!("//storage.googleapis.com/{bucket}"),
+            entity,
+            role,
+            options,
+        )
+        .await
+    }
+
+    async fn delete_default_object_acl_plain(
+        &self,
+        bucket: String,
+        entity: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.delete_acl_plain(
+            format!(
+                "/storage/v1/b/{}/defaultObjectAcl/{}",
+                enc(&bucket_id),
+                enc(&entity)
+            ),
+            "/storage/v1/b/{bucket}/defaultObjectAcl/{entity}",
+            format!("//storage.googleapis.com/{bucket}"),
+            options,
+        )
+        .await
+    }
+
+    async fn list_object_acls_plain(
+        &self,
+        bucket: String,
+        object: String,
+        options: RequestOptions,
+    ) -> Result<Vec<AclRule>> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.list_acls_plain(
+            format!("/storage/v1/b/{}/o/{}/acl", enc(&bucket_id), enc(&object)),
+            "/storage/v1/b/{bucket}/o/{object}/acl",
+            format!("//storage.googleapis.com/{bucket}"),
+            options,
+        )
+        .await
+    }
+
+    async fn update_object_acl_plain(
+        &self,
+        bucket: String,
+        object: String,
+        entity: String,
+        role: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.update_acl_plain(
+            format!(
+                "/storage/v1/b/{}/o/{}/acl/{}",
+                enc(&bucket_id),
+                enc(&object),
+                enc(&entity)
+            ),
+            "/storage/v1/b/{bucket}/o/{object}/acl/{entity}",
+            format!("//storage.googleapis.com/{bucket}"),
+            entity,
+            role,
+            options,
+        )
+        .await
+    }
+
+    async fn delete_object_acl_plain(
+        &self,
+        bucket: String,
+        object: String,
+        entity: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let bucket_id = bucket_id(&bucket)?.to_string();
+        self.delete_acl_plain(
+            format!(
+                "/storage/v1/b/{}/o/{}/acl/{}",
+                enc(&bucket_id),
+                enc(&object),
+                enc(&entity)
+            ),
+            "/storage/v1/b/{bucket}/o/{object}/acl/{entity}",
+            format!("//storage.googleapis.com/{bucket}"),
+            options,
+        )
+        .await
+    }
+
+    async fn list_acls_plain(
+        &self,
+        path: String,
+        path_template: &'static str,
+        resource_name: String,
+        options: RequestOptions,
+    ) -> Result<Vec<AclRule>> {
+        let operation = AclOperation {
+            path,
+            path_template,
+            resource_name,
+        };
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::list_acls_attempt(inner.clone(), operation.clone(), options.clone(), current)
+                .await
+        };
+
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            true,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn list_acls_attempt(
+        inner: Arc<StorageInner>,
+        operation: AclOperation,
+        options: RequestOptions,
+        attempt_count: u32,
+    ) -> Result<Vec<AclRule>> {
+        let builder = acl_builder(inner, Method::GET, &operation.path, &options);
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(operation.path_template))
+            .insert_extension(ResourceName(operation.resource_name));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response = serde_json::from_slice::<RawAclList>(&body).map_err(Error::deser)?;
+        Ok(response.items.into_iter().map(AclRule::from).collect())
+    }
+
+    async fn update_acl_plain(
+        &self,
+        path: String,
+        path_template: &'static str,
+        resource_name: String,
+        entity: String,
+        role: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let operation = AclUpdateOperation {
+            acl: AclOperation {
+                path,
+                path_template,
+                resource_name,
+            },
+            entity,
+            role,
+        };
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::update_acl_attempt(inner.clone(), operation.clone(), options.clone(), current)
+                .await
+        };
+
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            false,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn update_acl_attempt(
+        inner: Arc<StorageInner>,
+        operation: AclUpdateOperation,
+        options: RequestOptions,
+        attempt_count: u32,
+    ) -> Result<()> {
+        let body = serde_json::to_vec(&RawAclRule::for_update(operation.entity, operation.role))
+            .map_err(Error::ser)?;
+        let builder = acl_builder(inner, Method::PUT, &operation.acl.path, &options)
+            .header("content-type", HeaderValue::from_static("application/json"))
+            .body(body);
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(operation.acl.path_template))
+            .insert_extension(ResourceName(operation.acl.resource_name));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        Ok(())
+    }
+
+    async fn delete_acl_plain(
+        &self,
+        path: String,
+        path_template: &'static str,
+        resource_name: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let operation = AclOperation {
+            path,
+            path_template,
+            resource_name,
+        };
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::delete_acl_attempt(inner.clone(), operation.clone(), options.clone(), current)
+                .await
+        };
+
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            false,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn delete_acl_attempt(
+        inner: Arc<StorageInner>,
+        operation: AclOperation,
+        options: RequestOptions,
+        attempt_count: u32,
+    ) -> Result<()> {
+        let builder = acl_builder(inner, Method::DELETE, &operation.path, &options);
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(operation.path_template))
+            .insert_extension(ResourceName(operation.resource_name));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        Ok(())
+    }
+
+    async fn list_notifications_plain(
+        &self,
+        bucket: String,
+        options: RequestOptions,
+    ) -> Result<BTreeMap<String, Notification>> {
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::list_notifications_attempt(inner.clone(), &bucket, &options, current).await
+        };
+
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            true,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn list_notifications_attempt(
+        inner: Arc<StorageInner>,
+        bucket: &str,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<BTreeMap<String, Notification>> {
+        let bucket_id = bucket_id(bucket)?;
+        let builder = notification_builder(
+            inner,
+            Method::GET,
+            &format!("/storage/v1/b/{}/notificationConfigs", enc(bucket_id)),
+            options,
+        );
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate("/storage/v1/b/{bucket}/notificationConfigs"))
+            .insert_extension(ResourceName(format!("//storage.googleapis.com/{bucket}")));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response =
+            serde_json::from_slice::<ListNotificationsResponse>(&body).map_err(Error::deser)?;
+        Ok(notifications_to_map(response.items))
+    }
+
+    async fn create_notification_plain(
+        &self,
+        bucket: String,
+        notification: Notification,
+        options: RequestOptions,
+    ) -> Result<Notification> {
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::create_notification_attempt(
+                inner.clone(),
+                &bucket,
+                notification.clone(),
+                &options,
+                current,
+            )
+            .await
+        };
+
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            false,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn create_notification_attempt(
+        inner: Arc<StorageInner>,
+        bucket: &str,
+        notification: Notification,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<Notification> {
+        let bucket_id = bucket_id(bucket)?;
+        let raw = RawNotification::from(notification);
+        let body = serde_json::to_vec(&raw).map_err(Error::ser)?;
+        let builder = notification_builder(
+            inner,
+            Method::POST,
+            &format!("/storage/v1/b/{}/notificationConfigs", enc(bucket_id)),
+            options,
+        )
+        .header("content-type", HeaderValue::from_static("application/json"))
+        .body(body);
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate("/storage/v1/b/{bucket}/notificationConfigs"))
+            .insert_extension(ResourceName(format!("//storage.googleapis.com/{bucket}")));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response = serde_json::from_slice::<RawNotification>(&body).map_err(Error::deser)?;
+        Ok(Notification::from(response))
+    }
+
+    async fn delete_notification_plain(
+        &self,
+        bucket: String,
+        notification: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::delete_notification_attempt(
+                inner.clone(),
+                &bucket,
+                &notification,
+                &options,
+                current,
+            )
+            .await
+        };
+
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            true,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn delete_notification_attempt(
+        inner: Arc<StorageInner>,
+        bucket: &str,
+        notification: &str,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<()> {
+        let bucket_id = bucket_id(bucket)?;
+        let builder = notification_builder(
+            inner,
+            Method::DELETE,
+            &format!(
+                "/storage/v1/b/{}/notificationConfigs/{}",
+                enc(bucket_id),
+                enc(notification)
+            ),
+            options,
+        );
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(
+                "/storage/v1/b/{bucket}/notificationConfigs/{notification}",
+            ))
+            .insert_extension(ResourceName(format!("//storage.googleapis.com/{bucket}")));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        Ok(())
+    }
+
+    async fn create_hmac_key_plain(
+        &self,
+        project: String,
+        service_account_email: String,
+        options: RequestOptions,
+    ) -> Result<HmacKey> {
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::create_hmac_key_attempt(
+                inner.clone(),
+                &project,
+                &service_account_email,
+                &options,
+                current,
+            )
+            .await
+        };
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            false,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn create_hmac_key_attempt(
+        inner: Arc<StorageInner>,
+        project: &str,
+        service_account_email: &str,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<HmacKey> {
+        let builder = hmac_builder(
+            inner,
+            Method::POST,
+            &format!("/storage/v1/projects/{}/hmacKeys", enc(project)),
+            options,
+        )
+        .query("serviceAccountEmail", service_account_email);
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate("/storage/v1/projects/{project}/hmacKeys"))
+            .insert_extension(ResourceName(format!(
+                "//storage.googleapis.com/projects/{project}"
+            )));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response = serde_json::from_slice::<RawHmacKey>(&body).map_err(Error::deser)?;
+        Ok(HmacKey::from(response))
+    }
+
+    async fn get_hmac_key_plain(
+        &self,
+        project: String,
+        access_id: String,
+        options: RequestOptions,
+    ) -> Result<HmacKey> {
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::get_hmac_key_attempt(inner.clone(), &project, &access_id, &options, current).await
+        };
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            true,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn get_hmac_key_attempt(
+        inner: Arc<StorageInner>,
+        project: &str,
+        access_id: &str,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<HmacKey> {
+        let builder = hmac_builder(
+            inner,
+            Method::GET,
+            &format!(
+                "/storage/v1/projects/{}/hmacKeys/{}",
+                enc(project),
+                enc(access_id)
+            ),
+            options,
+        );
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(
+                "/storage/v1/projects/{project}/hmacKeys/{access_id}",
+            ))
+            .insert_extension(ResourceName(format!(
+                "//storage.googleapis.com/projects/{project}"
+            )));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response = serde_json::from_slice::<RawHmacKeyMetadata>(&body).map_err(Error::deser)?;
+        Ok(HmacKey::from(response))
+    }
+
+    async fn update_hmac_key_plain(
+        &self,
+        project: String,
+        access_id: String,
+        update: HmacKeyUpdate,
+        options: RequestOptions,
+    ) -> Result<HmacKey> {
+        let idempotent = !update.etag.is_empty();
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::update_hmac_key_attempt(
+                inner.clone(),
+                &project,
+                &access_id,
+                update.clone(),
+                &options,
+                current,
+            )
+            .await
+        };
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            idempotent,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn update_hmac_key_attempt(
+        inner: Arc<StorageInner>,
+        project: &str,
+        access_id: &str,
+        update: HmacKeyUpdate,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<HmacKey> {
+        let body = serde_json::to_vec(&RawHmacKeyMetadata::from(update)).map_err(Error::ser)?;
+        let builder = hmac_builder(
+            inner,
+            Method::PUT,
+            &format!(
+                "/storage/v1/projects/{}/hmacKeys/{}",
+                enc(project),
+                enc(access_id)
+            ),
+            options,
+        )
+        .header("content-type", HeaderValue::from_static("application/json"))
+        .body(body);
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(
+                "/storage/v1/projects/{project}/hmacKeys/{access_id}",
+            ))
+            .insert_extension(ResourceName(format!(
+                "//storage.googleapis.com/projects/{project}"
+            )));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response = serde_json::from_slice::<RawHmacKeyMetadata>(&body).map_err(Error::deser)?;
+        Ok(HmacKey::from(response))
+    }
+
+    async fn delete_hmac_key_plain(
+        &self,
+        project: String,
+        access_id: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::delete_hmac_key_attempt(inner.clone(), &project, &access_id, &options, current)
+                .await
+        };
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            true,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn delete_hmac_key_attempt(
+        inner: Arc<StorageInner>,
+        project: &str,
+        access_id: &str,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<()> {
+        let builder = hmac_builder(
+            inner,
+            Method::DELETE,
+            &format!(
+                "/storage/v1/projects/{}/hmacKeys/{}",
+                enc(project),
+                enc(access_id)
+            ),
+            options,
+        );
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate(
+                "/storage/v1/projects/{project}/hmacKeys/{access_id}",
+            ))
+            .insert_extension(ResourceName(format!(
+                "//storage.googleapis.com/projects/{project}"
+            )));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        Ok(())
+    }
+
+    async fn list_hmac_keys_plain(
+        &self,
+        project: String,
+        service_account_email: Option<String>,
+        show_deleted_keys: bool,
+        page_size: Option<i64>,
+        page_token: Option<String>,
+        options: RequestOptions,
+    ) -> Result<ListHmacKeysResponse> {
+        let params = ListHmacKeysParams {
+            project,
+            service_account_email,
+            show_deleted_keys,
+            page_size,
+            page_token,
+        };
+        let inner = self.inner.clone();
+        let throttler = options.retry_throttler.clone();
+        let retry = options.retry_policy.clone();
+        let backoff = options.backoff_policy.clone();
+        let mut count = 0;
+        let attempt = async move |_| {
+            let current = count;
+            count += 1;
+            Self::list_hmac_keys_attempt(inner.clone(), &params, &options, current).await
+        };
+        google_cloud_gax::retry_loop_internal::retry_loop(
+            attempt,
+            async |duration| tokio::time::sleep(duration).await,
+            true,
+            throttler,
+            retry,
+            backoff,
+        )
+        .await
+    }
+
+    async fn list_hmac_keys_attempt(
+        inner: Arc<StorageInner>,
+        params: &ListHmacKeysParams,
+        options: &RequestOptions,
+        attempt_count: u32,
+    ) -> Result<ListHmacKeysResponse> {
+        let builder = hmac_builder(
+            inner,
+            Method::GET,
+            &format!("/storage/v1/projects/{}/hmacKeys", enc(&params.project)),
+            options,
+        );
+        let builder = params
+            .service_account_email
+            .as_deref()
+            .into_iter()
+            .fold(builder, |b, v| b.query("serviceAccountEmail", v));
+        let builder = if params.show_deleted_keys {
+            builder.query("showDeletedKeys", true)
+        } else {
+            builder
+        };
+        let builder = params
+            .page_size
+            .into_iter()
+            .fold(builder, |b, v| b.query("maxResults", v));
+        let builder = params
+            .page_token
+            .as_deref()
+            .into_iter()
+            .fold(builder, |b, v| b.query("pageToken", v));
+        let options = options
+            .gax()
+            .insert_extension(PathTemplate("/storage/v1/projects/{project}/hmacKeys"))
+            .insert_extension(ResourceName(format!(
+                "//storage.googleapis.com/projects/{}",
+                params.project
+            )));
+        let response = builder
+            .send(options, AttemptInfo::new(attempt_count))
+            .await?;
+        if !response.status().is_success() {
+            return gaxi::http::to_http_error(response).await;
+        }
+        let body = response.bytes().await.map_err(Error::io)?;
+        let response =
+            serde_json::from_slice::<RawListHmacKeysResponse>(&body).map_err(Error::deser)?;
+        Ok(ListHmacKeysResponse::from(response))
+    }
+}
+
+fn bucket_id(bucket: &str) -> Result<&str> {
+    bucket.strip_prefix("projects/_/buckets/").ok_or_else(|| {
+        Error::binding(format!(
+            "malformed bucket name, it must start with `projects/_/buckets/`: {bucket}"
+        ))
+    })
+}
+
+fn acl_builder(
+    inner: Arc<StorageInner>,
+    method: Method,
+    path: &str,
+    options: &RequestOptions,
+) -> gaxi::http::HttpRequestBuilder {
+    let builder = inner.client.http_builder(method, path).header(
+        "x-goog-api-client",
+        HeaderValue::from_static(&X_GOOG_API_CLIENT_HEADER),
+    );
+    options
+        .user_project()
+        .into_iter()
+        .fold(builder, |builder, user_project| {
+            builder.query("userProject", user_project)
+        })
+}
+
+fn notification_builder(
+    inner: Arc<StorageInner>,
+    method: Method,
+    path: &str,
+    options: &RequestOptions,
+) -> gaxi::http::HttpRequestBuilder {
+    let builder = inner.client.http_builder(method, path).header(
+        "x-goog-api-client",
+        HeaderValue::from_static(&X_GOOG_API_CLIENT_HEADER),
+    );
+    options
+        .user_project()
+        .into_iter()
+        .fold(builder, |builder, user_project| {
+            builder.query("userProject", user_project)
+        })
+}
+
+#[derive(Clone)]
+struct AclOperation {
+    path: String,
+    path_template: &'static str,
+    resource_name: String,
+}
+
+#[derive(Clone)]
+struct AclUpdateOperation {
+    acl: AclOperation,
+    entity: String,
+    role: String,
+}
+
+struct ListHmacKeysParams {
+    project: String,
+    service_account_email: Option<String>,
+    show_deleted_keys: bool,
+    page_size: Option<i64>,
+    page_token: Option<String>,
+}
+
+fn hmac_builder(
+    inner: Arc<StorageInner>,
+    method: Method,
+    path: &str,
+    options: &RequestOptions,
+) -> gaxi::http::HttpRequestBuilder {
+    let builder = inner.client.http_builder(method, path).header(
+        "x-goog-api-client",
+        HeaderValue::from_static(&X_GOOG_API_CLIENT_HEADER),
+    );
+    options
+        .user_project()
+        .into_iter()
+        .fold(builder, |builder, user_project| {
+            builder.query("userProject", user_project)
+        })
 }
 
 impl super::stub::Storage for Storage {
@@ -324,6 +1403,190 @@ impl super::stub::Storage for Storage {
             return self.open_object_tracing(request, options).await;
         }
         self.open_object_plain(request, options).await
+    }
+
+    async fn service_account(&self, project: String, options: RequestOptions) -> Result<String> {
+        if self.tracing {
+            return self.service_account_tracing(project, options).await;
+        }
+        self.service_account_plain(project, options).await
+    }
+
+    async fn list_bucket_acls(
+        &self,
+        bucket: String,
+        options: RequestOptions,
+    ) -> Result<Vec<AclRule>> {
+        self.list_bucket_acls_plain(bucket, options).await
+    }
+
+    async fn update_bucket_acl(
+        &self,
+        bucket: String,
+        entity: String,
+        role: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.update_bucket_acl_plain(bucket, entity, role, options)
+            .await
+    }
+
+    async fn delete_bucket_acl(
+        &self,
+        bucket: String,
+        entity: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.delete_bucket_acl_plain(bucket, entity, options).await
+    }
+
+    async fn list_default_object_acls(
+        &self,
+        bucket: String,
+        options: RequestOptions,
+    ) -> Result<Vec<AclRule>> {
+        self.list_default_object_acls_plain(bucket, options).await
+    }
+
+    async fn update_default_object_acl(
+        &self,
+        bucket: String,
+        entity: String,
+        role: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.update_default_object_acl_plain(bucket, entity, role, options)
+            .await
+    }
+
+    async fn delete_default_object_acl(
+        &self,
+        bucket: String,
+        entity: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.delete_default_object_acl_plain(bucket, entity, options)
+            .await
+    }
+
+    async fn list_object_acls(
+        &self,
+        bucket: String,
+        object: String,
+        options: RequestOptions,
+    ) -> Result<Vec<AclRule>> {
+        self.list_object_acls_plain(bucket, object, options).await
+    }
+
+    async fn update_object_acl(
+        &self,
+        bucket: String,
+        object: String,
+        entity: String,
+        role: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.update_object_acl_plain(bucket, object, entity, role, options)
+            .await
+    }
+
+    async fn delete_object_acl(
+        &self,
+        bucket: String,
+        object: String,
+        entity: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.delete_object_acl_plain(bucket, object, entity, options)
+            .await
+    }
+
+    async fn list_notifications(
+        &self,
+        bucket: String,
+        options: RequestOptions,
+    ) -> Result<BTreeMap<String, Notification>> {
+        self.list_notifications_plain(bucket, options).await
+    }
+
+    async fn create_notification(
+        &self,
+        bucket: String,
+        notification: Notification,
+        options: RequestOptions,
+    ) -> Result<Notification> {
+        self.create_notification_plain(bucket, notification, options)
+            .await
+    }
+
+    async fn delete_notification(
+        &self,
+        bucket: String,
+        notification: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.delete_notification_plain(bucket, notification, options)
+            .await
+    }
+
+    async fn create_hmac_key(
+        &self,
+        project: String,
+        service_account_email: String,
+        options: RequestOptions,
+    ) -> Result<HmacKey> {
+        self.create_hmac_key_plain(project, service_account_email, options)
+            .await
+    }
+
+    async fn get_hmac_key(
+        &self,
+        project: String,
+        access_id: String,
+        options: RequestOptions,
+    ) -> Result<HmacKey> {
+        self.get_hmac_key_plain(project, access_id, options).await
+    }
+
+    async fn update_hmac_key(
+        &self,
+        project: String,
+        access_id: String,
+        update: HmacKeyUpdate,
+        options: RequestOptions,
+    ) -> Result<HmacKey> {
+        self.update_hmac_key_plain(project, access_id, update, options)
+            .await
+    }
+
+    async fn delete_hmac_key(
+        &self,
+        project: String,
+        access_id: String,
+        options: RequestOptions,
+    ) -> Result<()> {
+        self.delete_hmac_key_plain(project, access_id, options)
+            .await
+    }
+
+    async fn list_hmac_keys(
+        &self,
+        project: String,
+        service_account_email: Option<String>,
+        show_deleted_keys: bool,
+        page_size: Option<i64>,
+        page_token: Option<String>,
+        options: RequestOptions,
+    ) -> Result<ListHmacKeysResponse> {
+        self.list_hmac_keys_plain(
+            project,
+            service_account_email,
+            show_deleted_keys,
+            page_size,
+            page_token,
+            options,
+        )
+        .await
     }
 }
 

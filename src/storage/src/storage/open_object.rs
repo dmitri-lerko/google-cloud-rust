@@ -416,6 +416,29 @@ impl<S> OpenObject<S> {
         self.options.user_agent = Some(user_agent.into());
         self
     }
+
+    /// Sets the user project for Requester Pays billing on this request.
+    ///
+    /// Calls with a user project are billed to that project rather than to the
+    /// bucket's owning project. A user project is required for operations on
+    /// Requester Pays buckets.
+    ///
+    /// # Example
+    /// ```
+    /// # use google_cloud_storage::client::Storage;
+    /// # async fn sample(client: &Storage) -> anyhow::Result<()> {
+    /// let mut response = client
+    ///     .open_object("projects/_/buckets/my-bucket", "my-object")
+    ///     .with_user_project("billing-project")
+    ///     .send()
+    ///     .await?;
+    /// println!("response details={response:?}");
+    /// # Ok(()) }
+    /// ```
+    pub fn with_user_project(mut self, user_project: impl Into<String>) -> Self {
+        self.options.set_user_project(user_project);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -773,6 +796,83 @@ mod tests {
             .with_user_agent(USER_AGENT)
             .send()
             .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_project() -> anyhow::Result<()> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<TonicResult<BidiReadObjectResponse>>(1);
+        let initial = BidiReadObjectResponse {
+            metadata: Some(ProtoObject {
+                bucket: BUCKET_NAME.to_string(),
+                name: OBJECT_NAME.to_string(),
+                generation: 123456,
+                ..ProtoObject::default()
+            }),
+            ..BidiReadObjectResponse::default()
+        };
+        tx.send(Ok(initial)).await?;
+
+        let mut mock = MockStorage::new();
+        mock.expect_bidi_read_object().return_once(|request| {
+            let metadata = request.metadata();
+            let got = metadata
+                .get("x-goog-user-project")
+                .and_then(|v| v.to_str().ok());
+            assert_eq!(got, Some("billing-project"), "{metadata:?}");
+
+            Ok(TonicResponse::from(rx))
+        });
+        let (endpoint, _server) = start(BIND_ADDRESS, mock).await?;
+
+        let client = Storage::builder()
+            .with_credentials(Anonymous::new().build())
+            .with_endpoint(endpoint)
+            .build()
+            .await?;
+
+        let _descriptor = client
+            .open_object(BUCKET_NAME, OBJECT_NAME)
+            .with_user_project("billing-project")
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_user_project() -> anyhow::Result<()> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<TonicResult<BidiReadObjectResponse>>(1);
+        let initial = BidiReadObjectResponse {
+            metadata: Some(ProtoObject {
+                bucket: BUCKET_NAME.to_string(),
+                name: OBJECT_NAME.to_string(),
+                generation: 123456,
+                ..ProtoObject::default()
+            }),
+            ..BidiReadObjectResponse::default()
+        };
+        tx.send(Ok(initial)).await?;
+
+        let mut mock = MockStorage::new();
+        mock.expect_bidi_read_object().return_once(|request| {
+            let metadata = request.metadata();
+            let got = metadata
+                .get("x-goog-user-project")
+                .and_then(|v| v.to_str().ok());
+            assert_eq!(got, Some("client-billing-project"), "{metadata:?}");
+
+            Ok(TonicResponse::from(rx))
+        });
+        let (endpoint, _server) = start(BIND_ADDRESS, mock).await?;
+
+        let client = Storage::builder()
+            .with_credentials(Anonymous::new().build())
+            .with_endpoint(endpoint)
+            .with_user_project("client-billing-project")
+            .build()
+            .await?;
+
+        let _descriptor = client.open_object(BUCKET_NAME, OBJECT_NAME).send().await?;
         Ok(())
     }
 

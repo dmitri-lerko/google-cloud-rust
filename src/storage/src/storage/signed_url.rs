@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{error::SigningError, signed_url::UrlStyle, storage::client::ENCODED_CHARS};
+use crate::{
+    error::SigningError,
+    signed_url::{SigningScheme, UrlStyle},
+    storage::client::ENCODED_CHARS,
+};
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use google_cloud_auth::signer::Signer;
 use percent_encoding::{AsciiSet, utf8_percent_encode};
@@ -29,7 +35,8 @@ const PATH_ENCODE_SET: AsciiSet = ENCODED_CHARS.remove(b'/');
 /// [Signed URLs] provide a way to give time-limited read or write access to specific resources
 /// without sharing your credentials.
 ///
-/// This implementation uses the [V4 signing process].
+/// This implementation uses the [V4 signing process] by default, and can also
+/// generate V2 signed URLs for compatibility.
 ///
 /// # Example: Generating a Signed URL
 ///
@@ -128,6 +135,7 @@ pub struct SignedUrlBuilder {
     client_email: Option<String>,
     timestamp: DateTime<Utc>,
     url_style: UrlStyle,
+    scheme: SigningScheme,
 }
 
 #[derive(Debug)]
@@ -232,6 +240,7 @@ impl SignedUrlBuilder {
             client_email: None,
             timestamp: Utc::now(),
             url_style: UrlStyle::PathStyle,
+            scheme: SigningScheme::V4,
         }
     }
 
@@ -343,6 +352,33 @@ impl SignedUrlBuilder {
     /// ```
     pub fn with_url_style(mut self, url_style: UrlStyle) -> Self {
         self.url_style = url_style;
+        self
+    }
+
+    /// Sets the signing scheme for the signed URL.
+    ///
+    /// The default is [SigningScheme::V4]. Use [SigningScheme::V2] when you
+    /// need compatibility with systems that still expect V2 signed URLs.
+    ///
+    /// V2 signed URLs only support path-style URLs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use google_cloud_storage::builder::storage::SignedUrlBuilder;
+    /// # use google_cloud_auth::signer::Signer;
+    /// use google_cloud_storage::signed_url::SigningScheme;
+    ///
+    /// async fn run(signer: &Signer) -> anyhow::Result<()> {
+    ///     let url = SignedUrlBuilder::for_object("projects/_/buckets/my-bucket", "my-object.txt")
+    ///         .with_scheme(SigningScheme::V2)
+    ///         .sign_with(signer)
+    ///         .await?;
+    /// # Ok(())
+    /// }
+    /// ```
+    pub fn with_scheme(mut self, scheme: SigningScheme) -> Self {
+        self.scheme = scheme;
         self
     }
 
@@ -472,6 +508,98 @@ impl SignedUrlBuilder {
         clean_value.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
+    fn header_value(&self, name: &str) -> String {
+        self.headers
+            .get(name)
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    fn v2_canonical_extension_headers(&self) -> Vec<String> {
+        let mut headers = self
+            .headers
+            .iter()
+            .filter_map(|(name, value)| {
+                if !name.starts_with("x-goog-") {
+                    return None;
+                }
+                if name == "x-goog-encryption-key" || name == "x-goog-encryption-key-sha256" {
+                    return None;
+                }
+                let value = value.trim();
+                if value.is_empty() {
+                    return None;
+                }
+                Some(format!("{name}:{value}"))
+            })
+            .collect::<Vec<_>>();
+        headers.sort();
+        headers
+    }
+
+    async fn sign_v2(
+        self,
+        signer: &Signer,
+    ) -> std::result::Result<SigningComponents, SigningError> {
+        self.scope.check_bucket_name()?;
+        match self.url_style {
+            UrlStyle::PathStyle => {}
+            UrlStyle::BucketBoundHostname | UrlStyle::VirtualHostedStyle => {
+                return Err(SigningError::invalid_parameter(
+                    "url_style",
+                    "V2 signed URLs only support path-style URLs",
+                ));
+            }
+        }
+
+        let client_email = if let Some(email) = self.client_email.clone() {
+            email
+        } else {
+            signer.client_email().await.map_err(SigningError::signing)?
+        };
+        let expires = chrono::Duration::from_std(self.expiration)
+            .map(|duration| self.timestamp + duration)
+            .map_err(|e| SigningError::invalid_parameter("expiration", e))?
+            .timestamp();
+        let canonical_uri = self.scope.canonical_uri(UrlStyle::PathStyle);
+        let extension_headers = self.v2_canonical_extension_headers();
+
+        let mut string_to_sign = vec![
+            self.method.to_string(),
+            self.header_value("content-md5"),
+            self.header_value("content-type"),
+            expires.to_string(),
+        ];
+        string_to_sign.extend(extension_headers);
+        string_to_sign.push(canonical_uri.clone());
+        let string_to_sign = string_to_sign.join("\n");
+
+        let signature = signer
+            .sign(string_to_sign.as_str())
+            .await
+            .map_err(SigningError::signing)?;
+        let signature = BASE64_STANDARD.encode(signature);
+
+        let endpoint = self.resolve_endpoint_url()?;
+        let canonical_url = endpoint.canonical_url(&self.scope, UrlStyle::PathStyle);
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        for (k, v) in &self.query_parameters {
+            query.append_pair(k, v);
+        }
+        query.append_pair("Expires", &expires.to_string());
+        query.append_pair("GoogleAccessId", &client_email);
+        query.append_pair("Signature", &signature);
+        let signed_url = format!("{}?{}", canonical_url, query.finish());
+
+        Ok(SigningComponents {
+            #[cfg(test)]
+            canonical_request: string_to_sign.clone(),
+            #[cfg(test)]
+            string_to_sign,
+            signed_url,
+        })
+    }
+
     /// Generates the signed URL using the provided signer.
     /// Returns the signed URL, the string to sign, and the canonical request.
     /// Used to check conformance test expectations.
@@ -479,6 +607,11 @@ impl SignedUrlBuilder {
         self,
         signer: &Signer,
     ) -> std::result::Result<SigningComponents, SigningError> {
+        match self.scheme {
+            SigningScheme::V2 => return self.sign_v2(signer).await,
+            SigningScheme::V4 => {}
+        }
+
         // Validate the bucket name.
         self.scope.check_bucket_name()?;
 
@@ -619,6 +752,7 @@ mod tests {
     use google_cloud_auth::signer::{Result as SignResult, Signer, SigningError, SigningProvider};
     use serde::Deserialize;
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tokio::time::Duration;
 
     type TestResult = anyhow::Result<()>;
@@ -738,6 +872,153 @@ mod tests {
         let fut = SignedUrlBuilder::for_object("projects/_/buckets/b", "o").sign_with(&signer);
 
         assert_send(&fut);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signed_url_v2_matches_go_custom_sign_bytes() -> TestResult {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        let mut mock = MockSigner::new();
+        mock.expect_client_email()
+            .return_once(|| Ok("test@example.com".to_string()));
+        mock.expect_sign().return_once(move |content| {
+            captured_clone
+                .lock()
+                .expect("poisoned mutex")
+                .push(String::from_utf8(content.to_vec()).expect("canonical request is utf-8"));
+            Ok(bytes::Bytes::from_static(b"signed"))
+        });
+
+        let signer = Signer::from(mock);
+        let timestamp = DateTime::parse_from_rfc3339("2002-10-01T15:00:00Z")?.with_timezone(&Utc);
+        let got = SignedUrlBuilder::for_object("projects/_/buckets/bucket-name", "object-name")
+            .with_scheme(SigningScheme::V2)
+            .with_method(http::Method::GET)
+            .with_expiration(Duration::from_secs(24 * 60 * 60))
+            .with_header("content-md5", "ICy5YqxZB1uWSwcVLSNLcA==")
+            .with_header("content-type", "application/json")
+            .with_header("x-goog-header1", "true")
+            .with_header("x-goog-header2", "false")
+            .with_client_email("xxx@clientid")
+            .with_timestamp(timestamp)
+            .sign_with(&signer)
+            .await?;
+
+        assert_eq!(
+            got,
+            "https://storage.googleapis.com/bucket-name/object-name\
+            ?Expires=1033570800&GoogleAccessId=xxx%40clientid&Signature=c2lnbmVk"
+        );
+        assert_eq!(
+            captured.lock().expect("poisoned mutex").as_slice(),
+            ["GET\n\
+            ICy5YqxZB1uWSwcVLSNLcA==\n\
+            application/json\n\
+            1033570800\n\
+            x-goog-header1:true\n\
+            x-goog-header2:false\n\
+            /bucket-name/object-name"]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signed_url_v2_encodes_unsafe_object_names() -> TestResult {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        let mut mock = MockSigner::new();
+        mock.expect_client_email()
+            .return_once(|| Ok("test@example.com".to_string()));
+        mock.expect_sign().return_once(move |content| {
+            captured_clone
+                .lock()
+                .expect("poisoned mutex")
+                .push(String::from_utf8(content.to_vec()).expect("canonical request is utf-8"));
+            Ok(bytes::Bytes::from_static(b"signed"))
+        });
+
+        let signer = Signer::from(mock);
+        let timestamp = DateTime::parse_from_rfc3339("2002-10-01T15:00:00Z")?.with_timezone(&Utc);
+        let got = SignedUrlBuilder::for_object("projects/_/buckets/bucket-name", "object name界")
+            .with_scheme(SigningScheme::V2)
+            .with_method(http::Method::GET)
+            .with_expiration(Duration::from_secs(24 * 60 * 60))
+            .with_client_email("xxx@clientid")
+            .with_timestamp(timestamp)
+            .sign_with(&signer)
+            .await?;
+
+        assert_eq!(
+            got,
+            "https://storage.googleapis.com/bucket-name/object%20name%E7%95%8C\
+            ?Expires=1033570800&GoogleAccessId=xxx%40clientid&Signature=c2lnbmVk"
+        );
+        assert_eq!(
+            captured.lock().expect("poisoned mutex").as_slice(),
+            ["GET\n\n\n1033570800\n/bucket-name/object%20name%E7%95%8C"]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signed_url_v2_rejects_non_path_style_urls() -> TestResult {
+        let signer = Signer::from(MockSigner::new());
+        let err = SignedUrlBuilder::for_object("projects/_/buckets/bucket-name", "object-name")
+            .with_scheme(SigningScheme::V2)
+            .with_url_style(UrlStyle::VirtualHostedStyle)
+            .sign_with(&signer)
+            .await
+            .unwrap_err();
+
+        assert!(err.is_invalid_parameter(), "{err:?}");
+        assert!(err.to_string().contains("V2 signed URLs"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signed_url_v2_canonicalizes_extension_headers() -> TestResult {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        let mut mock = MockSigner::new();
+        mock.expect_client_email()
+            .return_once(|| Ok("test@example.com".to_string()));
+        mock.expect_sign().return_once(move |content| {
+            captured_clone
+                .lock()
+                .expect("poisoned mutex")
+                .push(String::from_utf8(content.to_vec()).expect("canonical request is utf-8"));
+            Ok(bytes::Bytes::from_static(b"signed"))
+        });
+
+        let signer = Signer::from(mock);
+        let timestamp = DateTime::parse_from_rfc3339("2002-10-01T15:00:00Z")?.with_timezone(&Utc);
+        let _ = SignedUrlBuilder::for_object("projects/_/buckets/bucket-name", "object-name")
+            .with_scheme(SigningScheme::V2)
+            .with_method(http::Method::PUT)
+            .with_expiration(Duration::from_secs(24 * 60 * 60))
+            .with_header("x-goog-zeta", "  last  ")
+            .with_header("x-goog-alpha", "first")
+            .with_header("x-goog-encryption-key", "excluded")
+            .with_header("x-goog-encryption-key-sha256", "excluded")
+            .with_header("x-goog-empty", "")
+            .with_header("x-not-goog", "excluded")
+            .with_client_email("xxx@clientid")
+            .with_timestamp(timestamp)
+            .sign_with(&signer)
+            .await?;
+
+        assert_eq!(
+            captured.lock().expect("poisoned mutex").as_slice(),
+            ["PUT\n\n\n1033570800\n\
+            x-goog-alpha:first\n\
+            x-goog-zeta:last\n\
+            /bucket-name/object-name"]
+        );
 
         Ok(())
     }

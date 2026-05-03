@@ -260,6 +260,73 @@ async fn upload_object_bytes() -> Result {
 }
 
 #[tokio::test]
+async fn upload_object_bytes_with_user_project() -> Result {
+    const PAYLOAD: &str = "hello";
+    let inner = test_inner_client(test_builder()).await;
+    let options = inner.options.clone();
+    let stub = crate::storage::transport::Storage::new_test(inner.clone());
+    let builder = WriteObject::new(
+        stub,
+        "projects/_/buckets/bucket",
+        "object",
+        PAYLOAD,
+        options,
+    )
+    .with_user_project("billing-project");
+    let request = perform_upload(inner, builder)
+        .single_shot_builder(SizeHint::with_exact(PAYLOAD.len() as u64))
+        .await?
+        .build_for_tests()
+        .await?;
+
+    assert_eq!(request.method(), Method::POST);
+    assert_eq!(
+        request.url().as_str(),
+        "http://private.googleapis.com/upload/storage/v1/b/bucket/o?uploadType=multipart&name=object&userProject=billing-project"
+    );
+    let (_metadata, contents) = parse_multipart_body(request).await?;
+    assert_eq!(contents, "hello");
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_object_bytes_user_project_is_url_encoded() -> Result {
+    const PAYLOAD: &str = "hello";
+    let user_project = "billing project/tenant:alpha";
+    let inner = test_inner_client(test_builder()).await;
+    let options = inner.options.clone();
+    let stub = crate::storage::transport::Storage::new_test(inner.clone());
+    let builder = WriteObject::new(
+        stub,
+        "projects/_/buckets/bucket",
+        "object",
+        PAYLOAD,
+        options,
+    )
+    .with_user_project(user_project);
+    let request = perform_upload(inner, builder)
+        .single_shot_builder(SizeHint::with_exact(PAYLOAD.len() as u64))
+        .await?
+        .build_for_tests()
+        .await?;
+
+    assert!(
+        request
+            .url()
+            .query_pairs()
+            .any(|(k, v)| k == "userProject" && v == user_project),
+        "{request:?}"
+    );
+    assert!(
+        !request.url().as_str().contains(user_project),
+        "{request:?}"
+    );
+    let (_metadata, contents) = parse_multipart_body(request).await?;
+    assert_eq!(contents, "hello");
+    Ok(())
+}
+
+#[tokio::test]
 async fn upload_object_metadata() -> Result {
     let inner = test_inner_client(test_builder()).await;
     let options = inner.options.clone();

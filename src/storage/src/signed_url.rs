@@ -14,6 +14,19 @@
 
 //! Types related to the signed URL feature. See [SignedUrlBuilder][crate::builder::storage::SignedUrlBuilder].
 
+/// The signing scheme used to create a signed URL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SigningScheme {
+    /// Sign the URL using the V2 signing process.
+    V2,
+    /// Sign the URL using the V4 signing process.
+    ///
+    /// This is the default signing scheme.
+    #[default]
+    V4,
+}
+
 /// Formatting style for signed URLs.
 ///
 /// There are several equivalent formats for signed URLs, see the [resource path] docs for more information.
